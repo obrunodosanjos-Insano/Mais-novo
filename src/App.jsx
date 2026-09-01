@@ -1,50 +1,133 @@
 import { useEffect, useMemo, useState } from 'react'
-import { BookOpen, Library, Pencil, Plus, Search, Trash2, X } from 'lucide-react'
-import { isSupabaseConfigured, supabase } from './lib/supabase'
+import { BookOpen, Library, LogOut, Pencil, Plus, Search, Trash2, UserRound, X } from 'lucide-react'
+import { createClient } from '@supabase/supabase-js'
 
 const emptyForm = {
-  title: '',
-  author: '',
-  isbn: '',
-  category: '',
-  publisher: '',
-  year: '',
-  pages: '',
-  status: 'Não lido',
-  shelf: '',
-  notes: '',
+  title: '', author: '', category: '', isbn: '', publisher: '', year: '', pages: '',
+  status: 'Não lido', shelf: '', notes: ''
 }
 
-function App() {
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || 'https://bxizwvofwketeyorpucu.supabase.co'
+const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_a6Sxr9eDmZfAJuC81UCkgA_XfImPF3L'
+const supabase = createClient(supabaseUrl, supabaseKey)
+const BOOKS_METADATA_KEY = 'library_books'
+
+function readBooks(user) {
+  const value = user?.user_metadata?.[BOOKS_METADATA_KEY]
+  return Array.isArray(value) ? value : []
+}
+
+export default function App() {
+  const [user, setUser] = useState(null)
+  const [authLoading, setAuthLoading] = useState(true)
+  const [authMode, setAuthMode] = useState('login')
+  const [authName, setAuthName] = useState('')
+  const [authEmail, setAuthEmail] = useState('')
+  const [authPassword, setAuthPassword] = useState('')
+  const [authMessage, setAuthMessage] = useState('')
+  const [authSubmitting, setAuthSubmitting] = useState(false)
   const [books, setBooks] = useState([])
   const [form, setForm] = useState(emptyForm)
   const [editingId, setEditingId] = useState(null)
-  const [search, setSearch] = useState('')
-  const [statusFilter, setStatusFilter] = useState('Todos')
-  const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState('')
   const [modalOpen, setModalOpen] = useState(false)
+  const [search, setSearch] = useState('')
+  const [filter, setFilter] = useState('Todos')
+  const [message, setMessage] = useState('')
+  const [saving, setSaving] = useState(false)
 
   useEffect(() => {
-    loadBooks()
+    supabase.auth.getUser().then(({ data, error }) => {
+      const nextUser = error ? null : data.user
+      setUser(nextUser)
+      setBooks(readBooks(nextUser))
+      setAuthLoading(false)
+    })
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      const nextUser = session?.user ?? null
+      setUser(nextUser)
+      setBooks(readBooks(nextUser))
+      setAuthLoading(false)
+      if (!nextUser) setMessage('')
+    })
+
+    return () => listener.subscription.unsubscribe()
   }, [])
 
-  async function loadBooks() {
-    if (!isSupabaseConfigured) {
-      setLoading(false)
-      return
+  async function handleAuthSubmit(e) {
+    e.preventDefault()
+    setAuthMessage('')
+    setAuthSubmitting(true)
+
+    const email = authEmail.trim()
+    const password = authPassword
+
+    if (authMode === 'signup') {
+      if (!authName.trim()) {
+        setAuthMessage('Informe seu nome.')
+        setAuthSubmitting(false)
+        return
+      }
+
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: { data: { full_name: authName.trim(), [BOOKS_METADATA_KEY]: [] } }
+      })
+
+      if (error) {
+        setAuthMessage(error.message)
+      } else if (data.session && data.user) {
+        setUser(data.user)
+        setBooks(readBooks(data.user))
+      } else {
+        const { data: loginData, error: loginError } = await supabase.auth.signInWithPassword({ email, password })
+        if (!loginError && loginData.user) {
+          setUser(loginData.user)
+          setBooks(readBooks(loginData.user))
+        } else {
+          setAuthMessage('A conta foi criada, mas o Supabase ainda está exigindo confirmação de e-mail nas configurações do projeto.')
+        }
+      }
+    } else {
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+      if (error) setAuthMessage(error.message)
+      else if (data.user) {
+        setUser(data.user)
+        setBooks(readBooks(data.user))
+      }
     }
 
-    setLoading(true)
-    const { data, error } = await supabase
-      .from('books')
-      .select('*')
-      .order('created_at', { ascending: false })
+    setAuthSubmitting(false)
+  }
 
-    if (error) setMessage(`Erro ao carregar livros: ${error.message}`)
-    else setBooks(data ?? [])
-    setLoading(false)
+  async function signOut() {
+    await supabase.auth.signOut()
+    setUser(null)
+    setBooks([])
+    setAuthEmail('')
+    setAuthPassword('')
+    setAuthMessage('')
+  }
+
+  async function persistBooks(nextBooks) {
+    if (!user) return false
+    setSaving(true)
+    setMessage('')
+
+    const { data, error } = await supabase.auth.updateUser({
+      data: { ...user.user_metadata, [BOOKS_METADATA_KEY]: nextBooks }
+    })
+
+    setSaving(false)
+    if (error) {
+      setMessage(`Não foi possível salvar no Supabase: ${error.message}`)
+      return false
+    }
+
+    if (data.user) setUser(data.user)
+    setBooks(nextBooks)
+    return true
   }
 
   function openCreate() {
@@ -57,127 +140,124 @@ function App() {
   function openEdit(book) {
     setEditingId(book.id)
     setForm({
-      title: book.title ?? '',
-      author: book.author ?? '',
-      isbn: book.isbn ?? '',
-      category: book.category ?? '',
-      publisher: book.publisher ?? '',
-      year: book.year ?? '',
-      pages: book.pages ?? '',
-      status: book.status ?? 'Não lido',
-      shelf: book.shelf ?? '',
-      notes: book.notes ?? '',
+      title: book.title,
+      author: book.author,
+      category: book.category || '',
+      isbn: book.isbn || '',
+      publisher: book.publisher || '',
+      year: book.year || '',
+      pages: book.pages || '',
+      status: book.status,
+      shelf: book.shelf || '',
+      notes: book.notes || ''
     })
     setMessage('')
     setModalOpen(true)
   }
 
-  function handleChange(event) {
-    const { name, value } = event.target
-    setForm((current) => ({ ...current, [name]: value }))
-  }
-
-  async function handleSubmit(event) {
-    event.preventDefault()
+  async function handleSubmit(e) {
+    e.preventDefault()
+    if (!user) return
     if (!form.title.trim() || !form.author.trim()) {
-      setMessage('Informe pelo menos o título e o autor.')
+      setMessage('Informe título e autor.')
       return
     }
-    if (!isSupabaseConfigured) {
-      setMessage('Configure as variáveis VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY.')
-      return
-    }
-
-    setSaving(true)
-    setMessage('')
 
     const payload = {
       title: form.title.trim(),
       author: form.author.trim(),
-      isbn: form.isbn.trim() || null,
-      category: form.category.trim() || null,
-      publisher: form.publisher.trim() || null,
+      category: form.category?.trim() || null,
+      isbn: form.isbn?.trim() || null,
+      publisher: form.publisher?.trim() || null,
       year: form.year ? Number(form.year) : null,
       pages: form.pages ? Number(form.pages) : null,
       status: form.status,
-      shelf: form.shelf.trim() || null,
-      notes: form.notes.trim() || null,
+      shelf: form.shelf?.trim() || null,
+      notes: form.notes?.trim() || null
     }
 
-    let result
-    if (editingId) {
-      result = await supabase.from('books').update(payload).eq('id', editingId).select().single()
-    } else {
-      result = await supabase.from('books').insert(payload).select().single()
-    }
+    const nextBooks = editingId
+      ? books.map((book) => book.id === editingId ? { ...book, ...payload } : book)
+      : [{ id: crypto.randomUUID(), created_at: new Date().toISOString(), ...payload }, ...books]
 
-    if (result.error) {
-      setMessage(`Não foi possível salvar: ${result.error.message}`)
-    } else {
-      await loadBooks()
-      setModalOpen(false)
-      setForm(emptyForm)
-      setEditingId(null)
-    }
-    setSaving(false)
+    const saved = await persistBooks(nextBooks)
+    if (!saved) return
+
+    setModalOpen(false)
+    setEditingId(null)
+    setForm(emptyForm)
   }
 
   async function removeBook(book) {
-    const confirmed = window.confirm(`Excluir “${book.title}”?`)
-    if (!confirmed || !isSupabaseConfigured) return
-
-    const { error } = await supabase.from('books').delete().eq('id', book.id)
-    if (error) setMessage(`Não foi possível excluir: ${error.message}`)
-    else setBooks((current) => current.filter((item) => item.id !== book.id))
+    if (!confirm(`Excluir “${book.title}”?`)) return
+    await persistBooks(books.filter((item) => item.id !== book.id))
   }
 
   const filteredBooks = useMemo(() => {
-    const term = search.trim().toLowerCase()
+    const term = search.toLowerCase().trim()
     return books.filter((book) => {
-      const matchesTerm = !term || [book.title, book.author, book.category, book.isbn]
+      const matchesSearch = !term || [book.title, book.author, book.category, book.isbn]
         .filter(Boolean)
         .some((value) => String(value).toLowerCase().includes(term))
-      const matchesStatus = statusFilter === 'Todos' || book.status === statusFilter
-      return matchesTerm && matchesStatus
+      const matchesFilter = filter === 'Todos' || book.status === filter
+      return matchesSearch && matchesFilter
     })
-  }, [books, search, statusFilter])
+  }, [books, search, filter])
 
-  const stats = useMemo(() => ({
+  const stats = {
     total: books.length,
     read: books.filter((book) => book.status === 'Lido').length,
     reading: books.filter((book) => book.status === 'Lendo').length,
-    unread: books.filter((book) => book.status === 'Não lido').length,
-  }), [books])
+    unread: books.filter((book) => book.status === 'Não lido').length
+  }
+
+  if (authLoading) {
+    return <div className="auth-page"><div className="auth-card"><div className="auth-logo"><Library size={28}/></div><p>Carregando...</p></div></div>
+  }
+
+  if (!user) {
+    return (
+      <div className="auth-page">
+        <section className="auth-card">
+          <div className="auth-logo"><Library size={28}/></div>
+          <p className="eyebrow dark">MINHA BIBLIOTECA</p>
+          <h1>{authMode === 'login' ? 'Entre na sua estante' : 'Crie sua biblioteca'}</h1>
+          <p className="auth-subtitle">Cada conta possui seu próprio acervo privado, salvo no Supabase.</p>
+
+          <div className="auth-tabs">
+            <button className={authMode === 'login' ? 'active' : ''} onClick={() => { setAuthMode('login'); setAuthMessage('') }}>Entrar</button>
+            <button className={authMode === 'signup' ? 'active' : ''} onClick={() => { setAuthMode('signup'); setAuthMessage('') }}>Criar conta</button>
+          </div>
+
+          <form className="auth-form" onSubmit={handleAuthSubmit}>
+            {authMode === 'signup' && <label>Seu nome<input value={authName} onChange={(e) => setAuthName(e.target.value)} placeholder="Como você quer aparecer" required /></label>}
+            <label>E-mail<input type="email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="voce@email.com" required /></label>
+            <label>Senha<input type="password" minLength={6} value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} placeholder="Mínimo de 6 caracteres" required /></label>
+            {authMessage && <div className="auth-message">{authMessage}</div>}
+            <button className="primary-button auth-submit" type="submit" disabled={authSubmitting}>{authSubmitting ? 'Aguarde...' : authMode === 'login' ? 'Entrar' : 'Criar minha conta'}</button>
+          </form>
+        </section>
+      </div>
+    )
+  }
+
+  const displayName = user.user_metadata?.full_name || user.email?.split('@')[0] || 'Leitor'
 
   return (
     <div className="app-shell">
       <header className="topbar">
-        <div className="brand">
-          <div className="brand-icon"><Library size={24} /></div>
-          <div>
-            <strong>Minha Biblioteca</strong>
-            <span>Seu acervo de casa, organizado</span>
-          </div>
+        <div className="brand"><div className="brand-icon"><Library size={24}/></div><div><strong>Minha Biblioteca</strong><span>Seu acervo de casa, organizado</span></div></div>
+        <div className="top-actions">
+          <div className="profile-chip"><UserRound size={18}/><div><strong>{displayName}</strong><span>{user.email}</span></div></div>
+          <button className="secondary-button logout-button" onClick={() => void signOut()}><LogOut size={17}/> Sair</button>
+          <button className="primary-button" onClick={openCreate}><Plus size={18}/> Adicionar livro</button>
         </div>
-        <button className="primary-button" onClick={openCreate}><Plus size={18} /> Adicionar livro</button>
       </header>
 
       <main className="content">
-        <section className="hero">
-          <div>
-            <p className="eyebrow">ACERVO PESSOAL</p>
-            <h1>Todos os seus livros em um só lugar.</h1>
-            <p>Cadastre, encontre e acompanhe o que você já leu, está lendo ou ainda quer começar.</p>
-          </div>
-          <BookOpen className="hero-book" size={112} strokeWidth={1.2} />
-        </section>
+        <section className="hero"><div><p className="eyebrow">ACERVO PESSOAL</p><h1>Olá, {displayName}. Sua biblioteca é só sua.</h1><p>Cadastre, encontre e acompanhe tudo o que você tem em casa. Seus livros ficam vinculados à sua conta no Supabase.</p></div><BookOpen size={108} strokeWidth={1.15}/></section>
 
-        {!isSupabaseConfigured && (
-          <div className="notice">
-            O app está pronto, mas o Supabase ainda não foi configurado neste ambiente. Copie <code>.env.example</code> para <code>.env</code> e preencha as duas variáveis públicas.
-          </div>
-        )}
-
+        <div className="notice success-notice">Conta conectada ao Supabase • biblioteca privada por usuário</div>
         {message && <div className="notice error-notice">{message}</div>}
 
         <section className="stats-grid">
@@ -188,86 +268,18 @@ function App() {
         </section>
 
         <section className="toolbar">
-          <label className="search-box">
-            <Search size={18} />
-            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar por título, autor, categoria ou ISBN" />
-          </label>
-          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
-            <option>Todos</option>
-            <option>Não lido</option>
-            <option>Lendo</option>
-            <option>Lido</option>
-          </select>
+          <label className="search-box"><Search size={18}/><input placeholder="Buscar por título, autor, categoria ou ISBN" value={search} onChange={(e)=>setSearch(e.target.value)}/></label>
+          <select value={filter} onChange={(e)=>setFilter(e.target.value)}><option>Todos</option><option>Não lido</option><option>Lendo</option><option>Lido</option></select>
         </section>
 
-        {loading ? (
-          <div className="empty-state">Carregando biblioteca...</div>
-        ) : filteredBooks.length === 0 ? (
-          <div className="empty-state">
-            <BookOpen size={42} />
-            <h2>{books.length ? 'Nenhum livro encontrado' : 'Sua estante ainda está vazia'}</h2>
-            <p>{books.length ? 'Tente mudar a busca ou o filtro.' : 'Comece cadastrando o primeiro livro da sua coleção.'}</p>
-            {!books.length && <button className="primary-button" onClick={openCreate}><Plus size={18} /> Cadastrar primeiro livro</button>}
-          </div>
+        {filteredBooks.length === 0 ? (
+          <div className="empty-state"><BookOpen size={44}/><h2>{books.length ? 'Nenhum livro encontrado' : 'Sua estante ainda está vazia'}</h2><p>{books.length ? 'Tente outra busca ou filtro.' : 'Cadastre o primeiro livro da sua coleção.'}</p>{!books.length && <button className="primary-button" onClick={openCreate}><Plus size={18}/> Cadastrar primeiro livro</button>}</div>
         ) : (
-          <section className="books-grid">
-            {filteredBooks.map((book) => (
-              <article className="book-card" key={book.id}>
-                <div className="book-spine"><BookOpen size={30} /></div>
-                <div className="book-body">
-                  <div className="book-topline">
-                    <span className={`status ${book.status?.toLowerCase().replace(' ', '-')}`}>{book.status}</span>
-                    {book.shelf && <span className="shelf">{book.shelf}</span>}
-                  </div>
-                  <h2>{book.title}</h2>
-                  <p className="author">{book.author}</p>
-                  <div className="meta">
-                    {book.category && <span>{book.category}</span>}
-                    {book.year && <span>{book.year}</span>}
-                    {book.pages && <span>{book.pages} págs.</span>}
-                  </div>
-                  {book.notes && <p className="notes">{book.notes}</p>}
-                  <div className="card-actions">
-                    <button onClick={() => openEdit(book)}><Pencil size={16} /> Editar</button>
-                    <button className="danger" onClick={() => removeBook(book)}><Trash2 size={16} /> Excluir</button>
-                  </div>
-                </div>
-              </article>
-            ))}
-          </section>
+          <section className="books-grid">{filteredBooks.map((book)=><article className="book-card" key={book.id}><div className="book-spine"><BookOpen size={28}/></div><div className="book-body"><div className="book-topline"><span className="status">{book.status}</span>{book.shelf && <span>{book.shelf}</span>}</div><h2>{book.title}</h2><p className="author">{book.author}</p><div className="meta">{book.category && <span>{book.category}</span>}{book.year && <span>{book.year}</span>}{book.pages && <span>{book.pages} págs.</span>}</div>{book.notes && <p className="notes">{book.notes}</p>}<div className="card-actions"><button onClick={()=>openEdit(book)}><Pencil size={16}/>Editar</button><button className="danger" onClick={()=>void removeBook(book)}><Trash2 size={16}/>Excluir</button></div></div></article>)}</section>
         )}
       </main>
 
-      {modalOpen && (
-        <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setModalOpen(false)}>
-          <section className="modal">
-            <div className="modal-header">
-              <div><span>{editingId ? 'EDITAR LIVRO' : 'NOVO LIVRO'}</span><h2>{editingId ? 'Atualize os dados' : 'Cadastre na sua estante'}</h2></div>
-              <button className="icon-button" onClick={() => setModalOpen(false)}><X size={20} /></button>
-            </div>
-            <form onSubmit={handleSubmit}>
-              <div className="form-grid">
-                <label className="wide">Título *<input name="title" value={form.title} onChange={handleChange} required /></label>
-                <label>Autor *<input name="author" value={form.author} onChange={handleChange} required /></label>
-                <label>Categoria<input name="category" value={form.category} onChange={handleChange} placeholder="Romance, história..." /></label>
-                <label>ISBN<input name="isbn" value={form.isbn} onChange={handleChange} /></label>
-                <label>Editora<input name="publisher" value={form.publisher} onChange={handleChange} /></label>
-                <label>Ano<input type="number" min="0" max="9999" name="year" value={form.year} onChange={handleChange} /></label>
-                <label>Páginas<input type="number" min="1" name="pages" value={form.pages} onChange={handleChange} /></label>
-                <label>Status<select name="status" value={form.status} onChange={handleChange}><option>Não lido</option><option>Lendo</option><option>Lido</option></select></label>
-                <label>Local / estante<input name="shelf" value={form.shelf} onChange={handleChange} placeholder="Ex.: Estante 2" /></label>
-                <label className="wide">Observações<textarea name="notes" value={form.notes} onChange={handleChange} rows="4" /></label>
-              </div>
-              <div className="modal-actions">
-                <button type="button" className="secondary-button" onClick={() => setModalOpen(false)}>Cancelar</button>
-                <button type="submit" className="primary-button" disabled={saving}>{saving ? 'Salvando...' : editingId ? 'Salvar alterações' : 'Cadastrar livro'}</button>
-              </div>
-            </form>
-          </section>
-        </div>
-      )}
+      {modalOpen && <div className="modal-backdrop" onMouseDown={(e)=>e.target===e.currentTarget && setModalOpen(false)}><section className="modal"><div className="modal-header"><div><span>{editingId ? 'EDITAR LIVRO' : 'NOVO LIVRO'}</span><h2>{editingId ? 'Atualize os dados' : 'Cadastre na sua estante'}</h2></div><button className="icon-button" onClick={()=>setModalOpen(false)}><X size={20}/></button></div><form onSubmit={handleSubmit}><div className="form-grid"><label className="wide">Título *<input value={form.title} onChange={(e)=>setForm({...form,title:e.target.value})} required/></label><label>Autor *<input value={form.author} onChange={(e)=>setForm({...form,author:e.target.value})} required/></label><label>Categoria<input value={form.category || ''} onChange={(e)=>setForm({...form,category:e.target.value})}/></label><label>ISBN<input value={form.isbn || ''} onChange={(e)=>setForm({...form,isbn:e.target.value})}/></label><label>Editora<input value={form.publisher || ''} onChange={(e)=>setForm({...form,publisher:e.target.value})}/></label><label>Ano<input type="number" value={form.year} onChange={(e)=>setForm({...form,year:e.target.value})}/></label><label>Páginas<input type="number" value={form.pages} onChange={(e)=>setForm({...form,pages:e.target.value})}/></label><label>Status<select value={form.status} onChange={(e)=>setForm({...form,status:e.target.value})}><option>Não lido</option><option>Lendo</option><option>Lido</option></select></label><label>Estante / local<input value={form.shelf || ''} onChange={(e)=>setForm({...form,shelf:e.target.value})}/></label><label className="wide">Observações<textarea rows={4} value={form.notes || ''} onChange={(e)=>setForm({...form,notes:e.target.value})}/></label></div><div className="modal-actions"><button type="button" className="secondary-button" onClick={()=>setModalOpen(false)}>Cancelar</button><button type="submit" className="primary-button" disabled={saving}>{saving ? 'Salvando...' : editingId ? 'Salvar alterações' : 'Cadastrar livro'}</button></div></form></section></div>}
     </div>
   )
 }
-
-export default App
