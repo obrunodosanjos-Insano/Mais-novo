@@ -11,14 +11,25 @@ const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || 'https://bxizwvofwketey
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_a6Sxr9eDmZfAJuC81UCkgA_XfImPF3L'
 const supabase = createClient(supabaseUrl, supabaseKey)
 const BOOKS_METADATA_KEY = 'library_books'
+const GUEST_BOOKS_KEY = 'library_guest_books'
 
 function readBooks(user) {
   const value = user?.user_metadata?.[BOOKS_METADATA_KEY]
   return Array.isArray(value) ? value : []
 }
 
+function readGuestBooks() {
+  try {
+    const value = JSON.parse(localStorage.getItem(GUEST_BOOKS_KEY) || '[]')
+    return Array.isArray(value) ? value : []
+  } catch {
+    return []
+  }
+}
+
 export default function App() {
   const [user, setUser] = useState(null)
+  const [guest, setGuest] = useState(false)
   const [authLoading, setAuthLoading] = useState(true)
   const [authMode, setAuthMode] = useState('login')
   const [authName, setAuthName] = useState('')
@@ -44,6 +55,7 @@ export default function App() {
     })
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (guest) return
       const nextUser = session?.user ?? null
       setUser(nextUser)
       setBooks(readBooks(nextUser))
@@ -52,7 +64,7 @@ export default function App() {
     })
 
     return () => listener.subscription.unsubscribe()
-  }, [])
+  }, [guest])
 
   async function handleAuthSubmit(e) {
     e.preventDefault()
@@ -93,6 +105,7 @@ export default function App() {
       const { data, error } = await supabase.auth.signInWithPassword({ email, password })
       if (error) setAuthMessage(error.message)
       else if (data.user) {
+        setGuest(false)
         setUser(data.user)
         setBooks(readBooks(data.user))
       }
@@ -101,19 +114,46 @@ export default function App() {
     setAuthSubmitting(false)
   }
 
+  function enterAsGuest() {
+    setGuest(true)
+    setUser(null)
+    setBooks(readGuestBooks())
+    setAuthMessage('')
+    setMessage('')
+  }
+
   async function signOut() {
-    await supabase.auth.signOut()
+    if (!guest) await supabase.auth.signOut()
+    setGuest(false)
     setUser(null)
     setBooks([])
     setAuthEmail('')
     setAuthPassword('')
     setAuthMessage('')
+    setMessage('')
   }
 
   async function persistBooks(nextBooks) {
-    if (!user) return false
     setSaving(true)
     setMessage('')
+
+    if (guest) {
+      try {
+        localStorage.setItem(GUEST_BOOKS_KEY, JSON.stringify(nextBooks))
+        setBooks(nextBooks)
+        setSaving(false)
+        return true
+      } catch {
+        setMessage('Não foi possível salvar os livros neste navegador.')
+        setSaving(false)
+        return false
+      }
+    }
+
+    if (!user) {
+      setSaving(false)
+      return false
+    }
 
     const { data, error } = await supabase.auth.updateUser({
       data: { ...user.user_metadata, [BOOKS_METADATA_KEY]: nextBooks }
@@ -157,7 +197,7 @@ export default function App() {
 
   async function handleSubmit(e) {
     e.preventDefault()
-    if (!user) return
+    if (!user && !guest) return
     if (!form.title.trim() || !form.author.trim()) {
       setMessage('Informe título e autor.')
       return
@@ -215,14 +255,14 @@ export default function App() {
     return <div className="auth-page"><div className="auth-card"><div className="auth-logo"><Library size={28}/></div><p>Carregando...</p></div></div>
   }
 
-  if (!user) {
+  if (!user && !guest) {
     return (
       <div className="auth-page">
         <section className="auth-card">
           <div className="auth-logo"><Library size={28}/></div>
           <p className="eyebrow dark">MINHA BIBLIOTECA</p>
           <h1>{authMode === 'login' ? 'Entre na sua estante' : 'Crie sua biblioteca'}</h1>
-          <p className="auth-subtitle">Cada conta possui seu próprio acervo privado, salvo no Supabase.</p>
+          <p className="auth-subtitle">Entre na sua conta para sincronizar seu acervo ou continue como visitante sem fazer login.</p>
 
           <div className="auth-tabs">
             <button className={authMode === 'login' ? 'active' : ''} onClick={() => { setAuthMode('login'); setAuthMessage('') }}>Entrar</button>
@@ -235,29 +275,30 @@ export default function App() {
             <label>Senha<input type="password" minLength={6} value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} placeholder="Mínimo de 6 caracteres" required /></label>
             {authMessage && <div className="auth-message">{authMessage}</div>}
             <button className="primary-button auth-submit" type="submit" disabled={authSubmitting}>{authSubmitting ? 'Aguarde...' : authMode === 'login' ? 'Entrar' : 'Criar minha conta'}</button>
+            <button className="secondary-button auth-submit" type="button" onClick={enterAsGuest}>Entrar sem fazer login</button>
           </form>
         </section>
       </div>
     )
   }
 
-  const displayName = user.user_metadata?.full_name || user.email?.split('@')[0] || 'Leitor'
+  const displayName = guest ? 'Visitante' : (user?.user_metadata?.full_name || user?.email?.split('@')[0] || 'Leitor')
 
   return (
     <div className="app-shell">
       <header className="topbar">
         <div className="brand"><div className="brand-icon"><Library size={24}/></div><div><strong>Minha Biblioteca</strong><span>Seu acervo de casa, organizado</span></div></div>
         <div className="top-actions">
-          <div className="profile-chip"><UserRound size={18}/><div><strong>{displayName}</strong><span>{user.email}</span></div></div>
-          <button className="secondary-button logout-button" onClick={() => void signOut()}><LogOut size={17}/> Sair</button>
+          <div className="profile-chip"><UserRound size={18}/><div><strong>{displayName}</strong><span>{guest ? 'Modo visitante' : user?.email}</span></div></div>
+          <button className="secondary-button logout-button" onClick={() => void signOut()}><LogOut size={17}/> {guest ? 'Voltar' : 'Sair'}</button>
           <button className="primary-button" onClick={openCreate}><Plus size={18}/> Adicionar livro</button>
         </div>
       </header>
 
       <main className="content">
-        <section className="hero"><div><p className="eyebrow">ACERVO PESSOAL</p><h1>Olá, {displayName}. Sua biblioteca é só sua.</h1><p>Cadastre, encontre e acompanhe tudo o que você tem em casa. Seus livros ficam vinculados à sua conta no Supabase.</p></div><BookOpen size={108} strokeWidth={1.15}/></section>
+        <section className="hero"><div><p className="eyebrow">ACERVO PESSOAL</p><h1>Olá, {displayName}. Sua biblioteca é só sua.</h1><p>{guest ? 'Você está usando o modo visitante. Seus livros ficam salvos apenas neste navegador.' : 'Cadastre, encontre e acompanhe tudo o que você tem em casa. Seus livros ficam vinculados à sua conta no Supabase.'}</p></div><BookOpen size={108} strokeWidth={1.15}/></section>
 
-        <div className="notice success-notice">Conta conectada ao Supabase • biblioteca privada por usuário</div>
+        <div className="notice success-notice">{guest ? 'Modo visitante • dados salvos somente neste navegador' : 'Conta conectada ao Supabase • biblioteca privada por usuário'}</div>
         {message && <div className="notice error-notice">{message}</div>}
 
         <section className="stats-grid">
